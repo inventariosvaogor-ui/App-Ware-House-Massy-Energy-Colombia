@@ -2669,8 +2669,9 @@ const DRIVE_SCRIPT=`
 function doPost(e){
   try{
     var p=JSON.parse(e.postData.contents);
-    var folder=getOrCreate('AlmacenApp');
-    var sub=getOrCreate(p.modulo||'General',folder);
+    var root=getOrCreate('AlmacenApp');
+    var mod=getOrCreate(p.modulo||'General',root);
+    var sub=getOrCreate(p.fecha||hoy(),mod);
     var bytes=Utilities.base64Decode(p.foto);
     var blob=Utilities.newBlob(bytes,p.tipo||'image/jpeg',p.nombre||'foto.jpg');
     sub.createFile(blob);
@@ -2678,7 +2679,15 @@ function doPost(e){
   }catch(err){return out({ok:false,e:err.message});}
 }
 function doGet(){return out({ok:true,status:'AlmacenApp Drive OK'});}
-function getOrCreate(n,p){var r=p||DriveApp.getRootFolder();var i=r.getFoldersByName(n);return i.hasNext()?i.next():r.createFolder(n);}
+function getOrCreate(n,p){
+  var r=p||DriveApp.getRootFolder();
+  var i=r.getFoldersByName(n);
+  return i.hasNext()?i.next():r.createFolder(n);
+}
+function hoy(){
+  var d=new Date();
+  return Utilities.formatDate(d,Session.getScriptTimeZone(),'yyyy-MM-dd');
+}
 function out(d){return ContentService.createTextOutput(JSON.stringify(d)).setMimeType(ContentService.MimeType.JSON);}
 `;
 
@@ -2735,16 +2744,13 @@ function copyDriveScript(){
     .catch(()=>toast('⚠️ Copia el código manualmente'));
 }
 
-async function _driveUpload(dataUrl,fname,modName){
+async function _driveUpload(dataUrl,fname,modName,fecha){
   if(!driveScriptUrl)return false;
   try{
     const base64=dataUrl.split(',')[1];if(!base64)return false;
-    // Usar cors (no no-cors) para poder verificar que realmente llegó al servidor
-    // Content-Type text/plain evita el preflight CORS
     const resp=await fetch(driveScriptUrl,{
-      method:'POST',
-      mode:'cors',
-      body:JSON.stringify({foto:base64,nombre:fname,modulo:modName,tipo:'image/jpeg'}),
+      method:'POST',mode:'cors',
+      body:JSON.stringify({foto:base64,nombre:fname,modulo:modName,tipo:'image/jpeg',fecha:fecha||hoyStr()}),
       headers:{'Content-Type':'text/plain'}
     });
     if(!resp.ok){console.warn('Drive error HTTP:',resp.status);return false;}
@@ -2757,58 +2763,78 @@ async function _driveUpload(dataUrl,fname,modName){
   }
 }
 
-async function _driveUploadBatch(tasks,modName){
+function hoyStr(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+function getFechaFromVals(vals){
+  // Buscar campo tipo fecha en los valores del formulario
+  if(!activeMod)return hoyStr();
+  const dateField=activeMod.fields.find(f=>f.type==='date'&&vals[f.id]);
+  if(dateField&&vals[dateField.id]) return vals[dateField.id]; // formato yyyy-MM-dd
+  // Si no hay campo fecha, usar fecha de hoy
+  return hoyStr();
+}
+
+async function _driveUploadBatch(tasks,modName,fecha){
   if(!tasks.length)return;
   const email=gcfg.driveEmail||'Drive';
   toast('☁️ Subiendo '+tasks.length+' foto(s) a '+email+'...');
   const results=await Promise.all(tasks);
   const n=results.filter(Boolean).length;
   const fail=results.length-n;
-  if(n>0&&fail===0) toast('✅ '+n+' foto(s) subidas correctamente a '+email);
-  else if(n>0) toast('⚠️ '+n+' subidas, '+fail+' fallaron — verifica que el script esté autorizado');
-  else toast('❌ No se subió ninguna foto — abre ⚙️ y toca "Configurar" para verificar el script');
+  const ruta='AlmacenApp/'+modName+(fecha?'/'+fecha:'');
+  if(n>0&&fail===0) toast('✅ '+n+' foto(s) en '+email+' → '+ruta);
+  else if(n>0) toast('⚠️ '+n+' subidas, '+fail+' fallaron — verifica el script');
+  else toast('❌ No se subió ninguna — verifica la URL del script en ⚙️');
 }
 
 async function exportarFotosDrive(){
   if(!driveScriptUrl){toast('⚠️ Configura el script de Drive en ⚙️ primero');return;}
   saveFVals();const m=activeMod;if(!m)return;
-  const vals=getVals();const src=m.watermark!==false?fWM:fPhotos;
-  const tasks=src.map((p,i)=>p?_driveUpload(p,buildFileName(m,i,null,vals).split('/').pop(),m.name):null).filter(Boolean);
+  const vals=getVals();
+  const fecha=getFechaFromVals(vals);
+  const src=m.watermark!==false?fWM:fPhotos;
+  const tasks=src.map((p,i)=>p?_driveUpload(p,buildFileName(m,i,null,vals).split('/').pop(),m.name,fecha):null).filter(Boolean);
   if(!tasks.length){toast('⚠️ No hay fotos para exportar');return;}
-  await _driveUploadBatch(tasks,m.name);
+  await _driveUploadBatch(tasks,m.name,fecha);
 }
 
 async function exportarFotosDriveDisp(){
   if(!driveScriptUrl){toast('⚠️ Configura el script de Drive en ⚙️ primero');return;}
   const m=activeMod;if(!m)return;
+  const fecha=getFechaFromVals(Object.assign({},dispHeaderVals||{}));
   const tasks=[];
   dispItems.forEach((it,ii)=>{
     (it.photos||[]).forEach((p,pi)=>{
       if(!p)return;
       const show=(m.watermark!==false&&(it.watermarks||[])[pi])?it.watermarks[pi]:p;
-      tasks.push(_driveUpload(show,buildFileName(m,pi,ii,Object.assign({},dispHeaderVals||{},it.vals||{})).split('/').pop(),m.name));
+      tasks.push(_driveUpload(show,buildFileName(m,pi,ii,Object.assign({},dispHeaderVals||{},it.vals||{})).split('/').pop(),m.name,fecha));
     });
   });
   if(!tasks.length){toast('⚠️ No hay fotos para exportar');return;}
-  await _driveUploadBatch(tasks,m.name);
+  await _driveUploadBatch(tasks,m.name,fecha);
 }
 
 async function driveUploadFormPhotos(m,vals){
   const src=m.watermark!==false?fWM:fPhotos;
-  const tasks=src.map((p,i)=>p?_driveUpload(p,buildFileName(m,i,null,vals).split('/').pop(),m.name):null).filter(Boolean);
-  if(tasks.length)await _driveUploadBatch(tasks,m.name);
+  const fecha=getFechaFromVals(vals);
+  const tasks=src.map((p,i)=>p?_driveUpload(p,buildFileName(m,i,null,vals).split('/').pop(),m.name,fecha):null).filter(Boolean);
+  if(tasks.length)await _driveUploadBatch(tasks,m.name,fecha);
 }
 
 async function driveUploadDispPhotos(m){
+  const fecha=getFechaFromVals(Object.assign({},dispHeaderVals||{}));
   const tasks=[];
   dispItems.forEach((it,ii)=>{
     (it.photos||[]).forEach((p,pi)=>{
       if(!p)return;
       const show=(m.watermark!==false&&(it.watermarks||[])[pi])?it.watermarks[pi]:p;
-      tasks.push(_driveUpload(show,buildFileName(m,pi,ii,Object.assign({},dispHeaderVals||{},it.vals||{})).split('/').pop(),m.name));
+      tasks.push(_driveUpload(show,buildFileName(m,pi,ii,Object.assign({},dispHeaderVals||{},it.vals||{})).split('/').pop(),m.name,fecha));
     });
   });
-  if(tasks.length)await _driveUploadBatch(tasks,m.name);
+  if(tasks.length)await _driveUploadBatch(tasks,m.name,fecha);
 }
 
 
